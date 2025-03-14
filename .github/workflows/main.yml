@@ -1,0 +1,81 @@
+name: Action to build and push the project as a NuGet package to GitHub Package Registry
+
+on: 
+  push: 
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      Version: ${{ steps.gitversion.outputs.SemVer }}
+      CommitsSinceVersionSource: ${{ steps.gitversion.outputs.CommitsSinceVersionSource }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 0 # fetch-depth is needed for GitVersion
+
+      # Install and calculate the new version with GitVersion
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v0.9.7
+        with:
+          versionSpec: 5.x
+
+      - name: Determine Version
+        uses: gittools/actions/gitversion/execute@v0.9.7
+        id: gitversion # Step ID used as reference for output values
+
+      - name: Display GitVersion outputs
+        run: |
+          echo "Version: ${{ steps.gitversion.outputs.SemVer }}"
+          echo "CommitsSinceVersionSource: ${{ steps.gitversion.outputs.CommitsSinceVersionSource }}"
+
+      # Build and pack the project
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: '6.0.x' 
+
+      - name: Build and Pack NuGet package
+        run: dotnet pack AutorizacionMiddleware/Autorizacion.Middleware/Autorizacion.Middleware.csproj -p:Version=${{ steps.gitversion.outputs.SemVer }} --configuration Release --output ./nupkgs
+
+      - name: Upload NuGet package to GitHub
+        uses: actions/upload-artifact@v2
+        with: 
+          name: nugetPackage
+          path: ./nupkgs/
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/master' # Only run job if on the master branch
+
+    steps: 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download NuGet package artifact
+        uses: actions/download-artifact@v2
+        with: 
+          name: nugetPackage
+          path: ./nupkgs/
+
+      - name: Prep packages
+        run: dotnet nuget add source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --name github --username ${{ github.actor }} --password ${{ secrets.PAQUETES_TOKEN }} --store-password-in-clear-text
+
+      - name: Push package to GitHub packages 
+        if: needs.build.outputs.CommitsSinceVersionSource > 0 # Only release if there has been a commit/version change
+        run: dotnet nuget push ./nupkgs/*.nupkg --source "github" --api-key ${{ secrets.PAQUETES_TOKEN }} --skip-duplicate
+
+      - name: Create release 
+        if: needs.build.outputs.CommitsSinceVersionSource > 0 # Only release if there has been a commit/version change
+        uses: ncipollo/release-action@v1
+        with: 
+          tag: ${{ needs.build.outputs.Version }}
+          name: Release ${{ needs.build.outputs.Version }}
+          artifacts: "./nupkgs/*.nupkg"
+          token: ${{ secrets.PAQUETES_TOKEN }}
+
+      
